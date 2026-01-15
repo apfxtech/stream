@@ -22,4 +22,3 @@ This repository uses two main branches:
 <a href="https://github.com/apfxtech/stream/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=apfxtech/stream" />
 </a>
-# stream
