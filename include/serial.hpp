@@ -2,6 +2,9 @@
 
 #include "stream.hpp"
 
+#ifdef FURI_OS
+#include "furi/serial.hpp"
+#else
 #ifndef ARDUINO
 #include <string>
 #include <string.h>
@@ -129,6 +132,7 @@ private:
 #endif // __APPLE__
 };
 #endif // ARDUINO
+#endif // FURI_OS
 
 #ifdef ARDUINO
 // #undef uSerial

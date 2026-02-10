@@ -12,9 +12,12 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <stdlib.h>
+#include <strings.h>
 
 // Буфер для приема данных через DMA
-#define FURI_SERIAL_RX_BUFFER_SIZE 256
+#define FURI_SERIAL_RX_BUFFER_SIZE 1024
+#define FURI_SERIAL_DEFAULT_BAUDRATE 115200UL
 
 class uSerial : public uStream
 {
@@ -23,6 +26,7 @@ public:
     ~uSerial();
 
     bool open(const char *port, unsigned long baudrate) override;
+    bool begin(int port, unsigned long baudrate);
     bool begin(FuriHalSerialId serial_id, unsigned long baudrate);
     bool begin(FuriHalSerialHandle* handle, unsigned long baudrate);
     bool attach(FuriHalSerialHandle* handle) { return begin(handle, 0); }

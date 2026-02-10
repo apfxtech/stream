@@ -10,6 +10,15 @@ The repository also includes **standards and utilities** for low-level byte proc
 * Run the same code across platforms without rewriting.
 * Byte-level utilities/standards (parsing, packing, conversions, etc.).
 
+## Flipper Serial
+
+On Flipper (`FURI_OS`) serial can be initialized with a simple port number:
+
+```cpp
+uSerial stream;
+stream.begin(1, 115200); // 1 = USART, 2 = LPUART
+```
+
 ## Branches
 
 This repository uses two main branches:

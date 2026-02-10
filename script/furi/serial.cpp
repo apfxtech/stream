@@ -19,16 +19,61 @@ uSerial::~uSerial()
 
 bool uSerial::open(const char *port, unsigned long baudrate)
 {
-    (void)port;
-    return begin(FuriHalSerialIdUsart, baudrate);
+    if (!port || !*port)
+    {
+        return begin(1, baudrate);
+    }
+
+    char* end_ptr = nullptr;
+    long parsed_port = strtol(port, &end_ptr, 10);
+    if (end_ptr && *end_ptr == '\0')
+    {
+        return begin((int)parsed_port, baudrate);
+    }
+
+    if (strcasecmp(port, "usart") == 0)
+    {
+        return begin(FuriHalSerialIdUsart, baudrate);
+    }
+
+    if (strcasecmp(port, "lpuart") == 0)
+    {
+        return begin(FuriHalSerialIdLpuart, baudrate);
+    }
+
+    LOG_ERROR_F("Unknown serial port '%s', use 1/2 or usart/lpuart", port);
+    return false;
+}
+
+bool uSerial::begin(int port, unsigned long baudrate)
+{
+    FuriHalSerialId serial_id;
+
+    if (port == 1)
+    {
+        serial_id = FuriHalSerialIdUsart;
+    }
+    else if (port == 2)
+    {
+        serial_id = FuriHalSerialIdLpuart;
+    }
+    else
+    {
+        LOG_ERROR_F("Invalid serial port %d, expected 1 (USART) or 2 (LPUART)", port);
+        return false;
+    }
+
+    return begin(serial_id, baudrate);
 }
 
 bool uSerial::begin(FuriHalSerialId serial_id, unsigned long baudrate)
 {
-    if (m_is_acquired)
+    if (m_handle || m_rx_enabled)
     {
         close();
     }
+
+    uint32_t effective_baudrate = (baudrate > 0) ? baudrate : FURI_SERIAL_DEFAULT_BAUDRATE;
     
     m_handle = furi_hal_serial_control_acquire(serial_id);
     if (!m_handle)
@@ -39,8 +84,17 @@ bool uSerial::begin(FuriHalSerialId serial_id, unsigned long baudrate)
     
     m_is_acquired = true;
     
+    if (!furi_hal_serial_is_baud_rate_supported(m_handle, effective_baudrate))
+    {
+        LOG_ERROR_F("Unsupported baudrate %lu", effective_baudrate);
+        furi_hal_serial_control_release(m_handle);
+        m_handle = nullptr;
+        m_is_acquired = false;
+        return false;
+    }
+
     // Инициализируем serial с указанной скоростью
-    furi_hal_serial_init(m_handle, baudrate);
+    furi_hal_serial_init(m_handle, effective_baudrate);
     
     // Включаем направления TX и RX
     furi_hal_serial_enable_direction(m_handle, FuriHalSerialDirectionTx);
@@ -58,13 +112,13 @@ bool uSerial::begin(FuriHalSerialId serial_id, unsigned long baudrate)
     m_rx_head = 0;
     m_rx_tail = 0;
     
-    LOG_INFO_F("uSerial opened successfully at %lu baud", baudrate);
+    LOG_INFO_F("uSerial opened successfully at %lu baud", effective_baudrate);
     return true;
 }
 
 bool uSerial::begin(FuriHalSerialHandle* handle, unsigned long baudrate)
 {
-    if (m_is_acquired)
+    if (m_handle || m_rx_enabled)
     {
         close();
     }
@@ -132,14 +186,14 @@ int uSerial::available() const
     if (!m_handle || !m_rx_enabled)
         return 0;
     
-    // Отключаем прерывания для атомарного чтения
-    furi_hal_cortex_disable_irq();
+    // Защищаем чтение ring-буфера от гонок с IRQ callback
+    FURI_CRITICAL_ENTER();
     
     // Вычисляем количество доступных байт в буфере
     size_t head = m_rx_head;
     size_t tail = m_rx_tail;
     
-    furi_hal_cortex_enable_irq();
+    FURI_CRITICAL_EXIT();
     
     if (head >= tail)
     {
@@ -154,21 +208,21 @@ int uSerial::available() const
 uint8_t uSerial::read()
 {
     if (!m_handle || !m_rx_enabled)
-        return 0;
+        return (uint8_t)-1;
     
-    // Отключаем прерывания для атомарного чтения
-    furi_hal_cortex_disable_irq();
+    // Защищаем чтение ring-буфера от гонок с IRQ callback
+    FURI_CRITICAL_ENTER();
     
     if (m_rx_head == m_rx_tail)
     {
-        furi_hal_cortex_enable_irq();
-        return 0;
+        FURI_CRITICAL_EXIT();
+        return (uint8_t)-1;
     }
     
     uint8_t byte = m_rx_buffer[m_rx_tail];
     m_rx_tail = (m_rx_tail + 1) % FURI_SERIAL_RX_BUFFER_SIZE;
     
-    furi_hal_cortex_enable_irq();
+    FURI_CRITICAL_EXIT();
     
     return byte;
 }
@@ -177,13 +231,16 @@ size_t uSerial::read(uint8_t *buffer, size_t length)
 {
     if (!buffer || length == 0 || !m_handle || !m_rx_enabled)
         return 0;
-    
+
     size_t bytes_read = 0;
-    while (bytes_read < length && available() > 0)
+    FURI_CRITICAL_ENTER();
+    while (bytes_read < length && m_rx_head != m_rx_tail)
     {
-        buffer[bytes_read++] = read();
+        buffer[bytes_read++] = m_rx_buffer[m_rx_tail];
+        m_rx_tail = (m_rx_tail + 1) % FURI_SERIAL_RX_BUFFER_SIZE;
     }
-    
+    FURI_CRITICAL_EXIT();
+
     return bytes_read;
 }
 
@@ -216,18 +273,31 @@ void uSerial::flush()
         furi_hal_serial_tx_wait_complete(m_handle);
     }
     
-    // Очищаем буфер приема (синхронизированно)
-    furi_hal_cortex_disable_irq();
+    // Очищаем буфер приема синхронизированно с IRQ
+    FURI_CRITICAL_ENTER();
     m_rx_head = 0;
     m_rx_tail = 0;
-    furi_hal_cortex_enable_irq();
+    FURI_CRITICAL_EXIT();
 }
 
 bool uSerial::poll(int timeout_ms)
 {
     if (!m_handle || !m_rx_enabled)
         return false;
-    
+
+    if (timeout_ms == 0)
+        return (available() > 0);
+
+    if (timeout_ms < 0)
+    {
+        while (true)
+        {
+            if (available() > 0)
+                return true;
+            furi_delay_ms(1);
+        }
+    }
+
     uint32_t start_time = furi_get_tick();
     uint32_t timeout_ticks = timeout_ms;
     
@@ -274,31 +344,42 @@ void uSerial::rx_callback(FuriHalSerialHandle* handle, FuriHalSerialRxEvent even
 
 void uSerial::on_rx_event(FuriHalSerialRxEvent event, size_t data_len)
 {
-    if (event & FuriHalSerialRxEventData && data_len > 0)
+    if (data_len > 0)
     {
-        // Читаем данные из DMA буфера (вызывается только из IRQ контекста)
+        // Полностью вычитываем DMA-буфер в рамках этого IRQ события.
+        // В HAL callback может прийти по IDLE с data_len > 0 даже без флага Data.
         uint8_t temp_buffer[64];
-        size_t to_read = (data_len > sizeof(temp_buffer)) ? sizeof(temp_buffer) : data_len;
-        size_t bytes_read = furi_hal_serial_dma_rx(m_handle, temp_buffer, to_read);
-        
-        // Записываем в наш буфер (в IRQ контексте доступ безопасен)
-        for (size_t i = 0; i < bytes_read; i++)
+        while (true)
         {
-            size_t next_head = (m_rx_head + 1) % FURI_SERIAL_RX_BUFFER_SIZE;
-            
-            // Если буфер полон, пропускаем старые данные (переполнение)
-            if (next_head == m_rx_tail)
+            size_t bytes_read = furi_hal_serial_dma_rx(m_handle, temp_buffer, sizeof(temp_buffer));
+            if (bytes_read == 0)
             {
-                m_rx_tail = (m_rx_tail + 1) % FURI_SERIAL_RX_BUFFER_SIZE;
+                break;
             }
-            
-            m_rx_buffer[m_rx_head] = temp_buffer[i];
-            m_rx_head = next_head;
+
+            for (size_t i = 0; i < bytes_read; i++)
+            {
+                size_t next_head = (m_rx_head + 1) % FURI_SERIAL_RX_BUFFER_SIZE;
+
+                // Если буфер полон, вытесняем самые старые байты.
+                if (next_head == m_rx_tail)
+                {
+                    m_rx_tail = (m_rx_tail + 1) % FURI_SERIAL_RX_BUFFER_SIZE;
+                }
+
+                m_rx_buffer[m_rx_head] = temp_buffer[i];
+                m_rx_head = next_head;
+            }
         }
     }
-    
-    // Игнорируем ошибки для простоты
-    (void)event;
+
+    if (event & (FuriHalSerialRxEventOverrunError |
+                 FuriHalSerialRxEventNoiseError |
+                 FuriHalSerialRxEventFrameError |
+                 FuriHalSerialRxEventParityError))
+    {
+        LOG_WARN_F("uSerial RX error event=0x%02X", event);
+    }
 }
 
 #endif // FURI_OS
